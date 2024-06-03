@@ -11,98 +11,145 @@ extern const char* SYSTEM_CLEAR;
 // Константы
 const uint32_t P = 0xb7e15163; //odd((e - 2)*2^w) - округление до большего, e - экспонента, f - золотое сечение 
 const uint32_t Q = 0x9e3779b9; //odd((f - 1)*2^w) для w = 32
-/*
-//генерация рандомного ключа размером 128 бит
-void generate_master_key(vector<unsigned char>& KEY, mt19937_64& mt) {
-    uniform_int_distribution<int> letters('a', 'z');
-    uniform_int_distribution<int> numbers(0, 9);
-    for (int i = 1; i <= 8; i++) {
-        KEY.push_back(letters(mt));
-        KEY.push_back('0' + numbers(mt));
+const int w = 32;
+const int r = 20; // Количество раундов, Key - размер ключа 128 бита
+
+// Этап 1: Конвертация секретного ключа
+void KeyExpansion(uint8_t* K, int b, uint32_t* L, int& c) {
+    c = (b + (w / 8 - 1)) / (w / 8);
+    for (int i = b - 1; i >= 0; i--) {
+        L[i / (w / 8)] = (L[i / (w / 8)] << 8) + K[i];
+    }
+    if (b % (w / 8) != 0) {
+        for (int i = b; i < c * (w / 8); i++) {
+            L[i / (w / 8)] <<= 8;
+        }
     }
 }
 
-//перевод числа из 2сс в 16сс
-string to_hex(unsigned int value) {
-    stringstream ss;
-    ss << hex << uppercase << setw(2) << setfill('0') << value;
-    return ss.str();
-}
-
-//преобразуем исходный текст string в vector 16cc
-vector<string> textToHex(const string& text) {
-    vector<string> result;
-    
-    // Преобразование текста в двоичное представление
-    for (char c : text) {
-        unsigned int byte = static_cast<unsigned int>(c);
-        result.push_back(to_hex(byte));
-    }
-    
-    // Дополнение вектора нулевыми значениями (padding)
-    while (result.size() % 4 != 0) {
-        result.push_back(to_hex(0));
-    }
-    
-    return result;
-}
-
-// Функция для шифрования
-string rc6_encrypt(string text) {
-	//переводим текст в 16 сс.
-	vector<string> vectorText = textToHex(text);
-
-    string result;
-    uint32_t plaintext;
-    uint32_t key;
-    uint32_t ciphertext;
-
-    // Разделяем 128-битный блок открытого текста на 4 32-битных слова
-    uint32_t A = plaintext[0];
-    uint32_t B = plaintext[1];
-    uint32_t C = plaintext[2];
-    uint32_t D = plaintext[3];
-
-    // Расширяем ключ до 44 32-битных подключей
-    uint32_t S[44];
-    uint32_t keylen = sizeof(key) / sizeof(uint32_t);
+// Этап 2: Инициализация массива ключей
+void InitializeS(uint32_t* S, int r) {
     S[0] = P;
-    for (int i = 1; i < 44; i++) {
-        S[i] = (S[i-1] + Q) & 0xFFFFFFFF;
+    for (int i = 1; i <= 2 * r + 3; i++) {
+        S[i] = S[i - 1] + Q;
     }
-
-    // Выполняем 20 раундов преобразования
-    for (int i = 0; i < 20; i++) {
-        uint32_t t = (B * (2*B + 1)) << 5;
-        t = t & 0xFFFFFFFF;
-        uint32_t u = (D * (2*D + 1)) << 5;
-        u = u & 0xFFFFFFFF;
-        A = (A ^ t) << u | (A >> (32 - u));
-        C = (C ^ u) << t | (C >> (32 - t));
-        swap(A, B);
-        swap(B, C);
-        swap(C, D);
-        A = (A + S[2*i]) & 0xFFFFFFFF;
-        C = (C + S[2*i+1]) & 0xFFFFFFFF;
-    }
-
-    // Записываем результат в выходной массив
-    ciphertext[0] = A;
-    ciphertext[1] = B;
-    ciphertext[2] = C;
-    ciphertext[3] = D;
-
-    return result;
 }
 
-string rc6_decrypt(string ciphertext){
+// Этап 3: Перемешивание
+void MixKeys(uint32_t* L, int c, uint32_t* S, int r) {
+    uint32_t A = 0, B = 0, i = 0, j = 0;
+    int v = 3 * max(c, 2 * r + 4);
+    for (int s = 1; s <= v; s++) {
+        A = S[i] = (S[i] + A + B) << 3;
+        B = L[j] = (L[j] + A + B) << (A + B);
+        i = (i + 1) % (2 * r + 4);
+        j = (j + 1) % c;
+    }
+}
+
+// Шифрование
+void Encrypt(uint32_t& A, uint32_t& B, uint32_t& C, uint32_t& D, uint32_t* S) {
+    B = B + S[0];
+    D = D + S[1];
+    for (int i = 1; i <= r; i++) {
+        uint32_t t = (B * (2 * B + 1)) << (int)log2(w);
+        uint32_t u = (D * (2 * D + 1)) << (int)log2(w);
+        A = ((A ^ t) << u) + S[2 * i];
+        C = ((C ^ u) << t) + S[2 * i + 1];
+        (A, B, C, D) = (B, C, D, A);
+    }
+    A = A + S[2 * r + 2];
+    C = C + S[2 * r + 3];
+}
+
+//подготовка к шифрованию
+vector<vector <uint32_t>> rc6_encrypt(string& encodedText2, uint8_t Key[16]){
+	wstring plaintext(encodedText2.begin(), encodedText2.end());
+	vector<vector <uint32_t>> encrypt;
+
+	cout << "Enter the 16-byte encryption key (in hex, separated by spaces): ";
+	string keyInput;
+	getline(cin, keyInput);
+
+	istringstream iss(keyInput);
+	int i = 0;
+	while (iss && i < 16) {
+		char byte[3];
+		iss >> byte;
+
+		// Проверяем, что введенная строка состоит только из 16-ричных цифр
+		for (int j = 0; j < 2; j++) {
+			if (!isxdigit(byte[j])) {
+				throw logic_error("Invalid 16-byte encryption key. Please enter only hexadecimal digits.");
+			}
+		}
+
+		Key[i++] = (uint8_t)strtol(byte, nullptr, 16);
+	}
+	if (i != 16) {
+		throw logic_error("Invalid 16-byte encryption key. Please enter exactly 16 bytes.");
+	}
+
+	const int b = 16;
+    uint32_t L[b / (w / 8)];
+    int c;
+    KeyExpansion(Key, b, L, c);
+
+    uint32_t S[2 * r + 4];
+    InitializeS(S, r);
+    MixKeys(L, c, S, r);
+
+	cout << "Encrypted: ";
+	for (wchar_t c : plaintext) {
+        uint32_t A = c, B = 0, C = 0, D = 0;
+        Encrypt(A, B, C, D, S);
+		encrypt.push_back({A, B, C, D});
+        cout << hex << setw(8) << setfill('0') << A << " " << setw(8) << setfill('0') << B << " " << setw(8) << setfill('0') << C << " " << setw(8) << setfill('0') << D << endl;
+    }
+	return encrypt;
+}
+
+//шифрование
+void Decrypt(uint32_t& A, uint32_t& B, uint32_t& C, uint32_t& D, uint32_t* S) {
+    C = C - S[2 * r + 3];
+    A = A - S[2 * r + 2];
+    for (int i = r; i >= 1; i--) {
+        (A, B, C, D) = (D, A, B, C);
+        uint32_t u = (D * (2 * D + 1)) << (int)log2(w);
+        uint32_t t = (B * (2 * B + 1)) << (int)log2(w);
+        C = ((C - S[2 * i + 1]) >> t) ^ u;
+        A = ((A - S[2 * i]) >> u) ^ t;
+    }
+    D = D - S[1];
+    B = B - S[0];
+}
+
+//подготовка к дешифровки
+string rc6_decrypt(vector<vector <uint32_t>>& encodedText1, uint8_t Key[16]){
+	const int b = 16;
+    uint32_t L[b / (w / 8)];
+    int c;
+    KeyExpansion(Key, b, L, c);
+
+    uint32_t S[2 * r + 4];
+    InitializeS(S, r);
+    MixKeys(L, c, S, r);
 	
+	string decryptedText;
+	for (auto elementMas: encodedText1){
+		uint32_t A = elementMas[0], B = elementMas[1], C = elementMas[2], D = elementMas[3];
+		Decrypt(A, B, C, D, S);
+        decryptedText += static_cast<char>(A);
+	}
+	return decryptedText;
 }
-*/
+
 void rc6(string& password1, string& password2){
-    /*
+    
 	int pick, pickencode;
 	string pass1, pass2, message, filename;
+	uint8_t Key[16];
+	vector<vector <uint32_t>> encoded;
 
 	while (true) {
 		try {
@@ -121,7 +168,7 @@ void rc6(string& password1, string& password2){
 			}
 
 			if (pick == 1) {
-				cout << "Enter the encoding password: " << endl;
+				cout << "Enter the encoding password: ";
 				cin >> pass1;
 				if (pass1 == password1) {
 					cout << "Input action:" << endl
@@ -140,11 +187,17 @@ void rc6(string& password1, string& password2){
 						getline(cin, message);
                         
 						WriteIntoFile("rc6.txt", message);
-						string encodedText2 = ReadFromFile("rc6.txt");
-						string encoded2 = rc6_encrypt(encodedText2);
-                        
-						cout << "Encrypted text: " << encoded2 << endl;
-						WriteIntoFile("decoded.txt", encoded2);
+						string encodedText = ReadFromFile("rc6.txt");
+
+						encoded = rc6_encrypt(encodedText, Key);
+						string str;
+                        for (auto i : encoded){
+							for (auto element: i){
+								str += to_string(element) + ' ';
+							}
+							str += '\n';
+						}
+						WriteIntoFile("decoded.txt", str);
 					}
 					if (pickencode == 2) {
 						cout << "Enter the name of the file with the extension: ";
@@ -152,12 +205,17 @@ void rc6(string& password1, string& password2){
 
 						if (exist(filename) == false)
 							throw logic_error("There is no such file or it cannot be opened!");
+						string encodedText = ReadFromFile(filename);
 
-						string encodedText1 = ReadFromFile(filename);
-						string encoded1 = rc6_encrypt(encodedText1);
-
-						cout << "Encrypted text: " << encoded1 << endl;
-						WriteIntoFile("decoded.txt", encoded1);
+						encoded = rc6_encrypt(encodedText, Key);
+						string str;
+                        for (auto i : encoded){
+							for (auto element: i){
+								str += to_string(element) + ' ';
+							}
+							str += '\n';
+						}
+						WriteIntoFile("decoded.txt", str);
 					}
 				} else {
 					throw logic_error("Invalid encoding password");
@@ -168,8 +226,8 @@ void rc6(string& password1, string& password2){
 				cin >> pass2;
 
 				if (pass2 == password2) {
-					string encodedText1 = ReadFromFile("decoded.txt");
-					string decoded1 = rc6_decrypt(encodedText1);
+					vector<vector <uint32_t>> encodedText1 = encoded;
+					string decoded1 = rc6_decrypt(encodedText1, Key);
 					WriteIntoFile("decoded1.txt", decoded1);
 
 					cout << "The decrypted text: " << decoded1 << endl;
@@ -187,6 +245,6 @@ void rc6(string& password1, string& password2){
 			cin.clear();
 			cin.ignore(256, '\n');
 		}
-	}*/
+	}
     return;
 }
